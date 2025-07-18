@@ -1,0 +1,37 @@
+{
+  "name": "baileys-bot",
+  "version": "1.0.0",
+  "description": "Modern WhatsApp Bot with Baileys",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "imports": {
+    "#config": "./settings/config.js",
+    "#database": "./database/db.js",
+    "#handler": "./src/handler.js",
+    "#lib/*": "./src/lib/*",
+    "#aihelper": "./src/lib/aiHelper.js",
+    "#connection": "./src/connection.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "npm:baileys-mod@latest",
+    "archiver": "^7.0.1",
+    "async-mutex": "^0.5.0",
+    "axios": "^1.6.0",
+    "better-sqlite3": "^9.4.3",
+    "cheerio": "^1.0.0-rc.12",
+    "form-data": "^4.0.0",
+    "link-preview-js": "^3.0.5",
+    "lru-cache": "^11.1.0",
+    "marked": "^13.0.0",
+    "pino": "^8.19.0",
+    "pino-pretty": "^11.0.0",
+    "pino-roll": "^1.1.0",
+    "jimp":"latest",
+    "wa-sticker-formatter": "^4.4.4"
+  },
+  "author": "NirKyy Dev",
+  "license": "MIT"
+}
