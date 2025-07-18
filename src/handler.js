@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { loadCommands } from '#lib/commandLoader.js';
 import config from '#config';
-import db, { statements, getGroupSettings, getAfkUser, getUserForLimiting, removeAfkUser, removePremium, susunkataSessions, rpgUserCache } from '#database';
+import db, { statements, getGroupSettings, getAfkUser, getUserForLimiting, removeAfkUser, removePremium, susunkataSessions, tictactoeSessions, rpgUserCache } from '#database';
 import logger from '#lib/logger.js';
 import { groupMetadataCache } from '#connection';
 import { handleAiInteraction } from '#lib/aiHelper.js';
@@ -22,6 +22,7 @@ const MAX_MESSAGE_PROCESS = 5;
 const EXEC_TIMEOUT = 30000;
 const LIMIT_REQUIRED_CATEGORIES = ['downloader', 'tools', 'ai'];
 const REWARD_SUSUNKATA = 1500;
+const TTT_GAME_TIMEOUT_MS = 10 * 60 * 1000;
 
 const whatsappGroupInviteRegex = /chat\.whatsapp\.com\/([0-9A-Za-z]{20,24})/i;
 
@@ -31,7 +32,7 @@ function formatDuration(ms) {
     return Object.entries(time).filter(val => val[1] !== 0).map(([key, val]) => `${val} ${key}`).join(', ') || 'beberapa saat';
 }
 
-const formatCoin = (number) => `${number.toLocaleString('id-ID')} 🪙`;
+const formatCoin = (number) => `${Math.floor(number).toLocaleString('id-ID')} 🪙`;
 const hashAnswer = (answer) => crypto.createHash('sha256').update(answer.toUpperCase()).digest('hex');
 
 async function checkUserGroupMembership(sock, userJid) {
@@ -117,6 +118,69 @@ function consumeLimit(userJid) {
     statements.updateUserLimit.run(userJid);
 }
 
+const tttNumberEmojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"];
+const winningCombinations = [
+    [0, 1, 2], [3, 4, 5], [6, 7, 8],
+    [0, 3, 6], [1, 4, 7], [2, 5, 8],
+    [0, 4, 8], [2, 4, 6]
+];
+
+function tttGenerateBoard(board) {
+    let boardStr = '';
+    for (let i = 0; i < 9; i++) {
+        boardStr += board[i] === '' ? tttNumberEmojis[i] : board[i];
+        if ((i + 1) % 3 === 0) boardStr += '\n';
+    }
+    return boardStr.trim();
+}
+
+function tttCreateGameMessage(session, statusText) {
+    const boardText = tttGenerateBoard(session.board);
+    const currentPlayer = session.players[session.currentPlayerIndex];
+    const playerTag = currentPlayer.jid === 'AI' ? 'AI' : `@${currentPlayer.jid.split('@')[0]}`;
+    const turnText = `Giliran: ${playerTag} (${currentPlayer.symbol})`;
+    const ZWS = '\u200B';
+    const metadata = `${ZWS.repeat(3)}TICTACTOE:${session.gameId}${ZWS.repeat(3)}`;
+    return `✨ *Tic Tac Toe* ✨\n\n${boardText}\n\nTaruhan: *${formatCoin(session.bet)}*\nStatus: _${statusText}_\n\n${turnText}\n${metadata}`;
+}
+
+function tttCheckWin(board) {
+    for (const combo of winningCombinations) {
+        const [a, b, c] = combo;
+        if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+            return board[a];
+        }
+    }
+    return null;
+}
+
+function tttCheckDraw(board) {
+    return board.every(cell => cell !== '');
+}
+
+function tttMakeAiMove(board, difficulty) {
+    const availableMoves = board.map((cell, index) => cell === '' ? index : null).filter(val => val !== null);
+    if (difficulty === 'mudah') {
+        return availableMoves[Math.floor(Math.random() * availableMoves.length)];
+    } else {
+        const opponentSymbol = '❌';
+        for (const move of availableMoves) {
+            const nextBoard = [...board];
+            nextBoard[move] = '⭕';
+            if (tttCheckWin(nextBoard)) return move;
+        }
+        for (const move of availableMoves) {
+            const nextBoard = [...board];
+            nextBoard[move] = opponentSymbol;
+            if (tttCheckWin(nextBoard)) return move;
+        }
+        if (availableMoves.includes(4)) return 4;
+        const corners = [0, 2, 6, 8].filter(c => availableMoves.includes(c));
+        if (corners.length > 0) return corners[Math.floor(Math.random() * corners.length)];
+        return availableMoves[Math.floor(Math.random() * availableMoves.length)];
+    }
+}
+
 export async function initializeHandler(sock) {
     if (!commandsMap) commandsMap = await loadCommands();
     sock.ev.on('messages.upsert', async ({ messages }) => {
@@ -142,43 +206,168 @@ export async function initializeHandler(sock) {
                         if (isGroup) {
                             statements.incrementMessageCount.run(m.key.remoteJid, m.sender);
                             
-                            const quotedText = m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.conversation;
-                            const metadataRegex = /\u200B\u200B\u200BSUSUNKATA:(\d+):([a-f0-9]+)\u200B\u200B\u200B/;
-                            const match = quotedText?.match(metadataRegex);
+                            let quotedText = '';
+                            const quotedMessage = m.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                            if (quotedMessage) {
+                                quotedText = quotedMessage.conversation || quotedMessage.extendedTextMessage?.text || '';
+                            }
+                            
+                            const susunkataMetadataRegex = /\u200B{3}SUSUNKATA:(\d+):([a-f0-9]+)\u200B{3}/;
+                            const tttInviteMetadataRegex = /\u200B{3}TTT_INVITE:(.*?)\u200B{3}/;
+                            const tttGameMetadataRegex = /\u200B{3}TICTACTOE:(.*?)\u200B{3}/;
+                            
+                            const susunkataMatch = quotedText.match(susunkataMetadataRegex);
+                            const tttInviteMatch = quotedText.match(tttInviteMetadataRegex);
+                            const tttGameMatch = quotedText.match(tttGameMetadataRegex);
 
-                            if (match) {
+                            if (susunkataMatch) {
                                 const gameSession = susunkataSessions.get(m.key.remoteJid);
                                 if (!gameSession) {
                                     return await sock.sendMessage(m.key.remoteJid, { text: 'Sesi game ini sudah berakhir.' }, { quoted: m });
                                 }
 
-                                const expiresAt = parseInt(match[1], 10);
+                                const expiresAt = parseInt(susunkataMatch[1], 10);
                                 if (Date.now() > expiresAt) {
                                     susunkataSessions.delete(m.key.remoteJid);
                                     return await sock.sendMessage(m.key.remoteJid, { text: `Waktu habis! 😥\n\nJawaban untuk soal "${gameSession.question}" adalah *${gameSession.answer}*.` }, { quoted: m });
                                 }
 
                                 const userAnswer = text.trim();
-                                const userAnswerHash = hashAnswer(userAnswer);
-
-                                if (userAnswerHash === match[2]) {
+                                if (hashAnswer(userAnswer) === susunkataMatch[2]) {
                                     const winnerJid = m.sender;
                                     const userRpg = statements.getRpgUser.get(winnerJid);
                                     let rewardMessage = '';
                                     if (userRpg) {
-                                        try {
-                                            db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(REWARD_SUSUNKATA, winnerJid);
-                                            rpgUserCache.delete(winnerJid);
-                                            rewardMessage = ` dan mendapatkan hadiah *${formatCoin(REWARD_SUSUNKATA)}*!`;
-                                        } catch (err) {
-                                            logger.warn({ err, user: winnerJid }, "Gagal memberi hadiah Susun Kata (kemungkinan belum register RPG).");
-                                        }
+                                        db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(REWARD_SUSUNKATA, winnerJid);
+                                        rpgUserCache.delete(winnerJid);
+                                        rewardMessage = ` dan mendapatkan hadiah *${formatCoin(REWARD_SUSUNKATA)}*!`;
                                     }
                                     const message = `*Benar!* 🎉\n\nJawaban: *${gameSession.answer}*\n\nSelamat kepada @${winnerJid.split('@')[0]} yang berhasil menjawab${rewardMessage}`;
                                     await sock.sendMessage(m.key.remoteJid, { text: message, mentions: [winnerJid] });
                                     susunkataSessions.delete(m.key.remoteJid);
                                 } else {
                                     await sock.sendMessage(m.key.remoteJid, { text: 'Jawaban salah, coba lagi!' }, { quoted: m });
+                                }
+                                return;
+                            }
+                            
+                            if (tttInviteMatch && text.toLowerCase() === 'terima') {
+                                const gameId = tttInviteMatch[1];
+                                const session = tictactoeSessions.get(m.key.remoteJid);
+                                if (!session || session.gameId !== gameId || session.mode !== 'pvp_invite') return;
+                                
+                                if (Date.now() > session.expiresAt) {
+                                    tictactoeSessions.delete(m.key.remoteJid);
+                                    return sock.sendMessage(m.key.remoteJid, { text: 'Waduh, tantangan ini sudah kedaluwarsa.' }, { quoted: m });
+                                }
+
+                                if (m.sender !== session.players[1].jid) return sock.sendMessage(m.key.remoteJid, { text: 'Hanya pemain yang ditantang yang bisa menerima.' }, { quoted: m });
+                                
+                                const p1 = statements.getRpgUser.get(session.players[0].jid);
+                                const p2 = statements.getRpgUser.get(session.players[1].jid);
+
+                                if (!p1 || !p2 || p1.money < session.bet || p2.money < session.bet) {
+                                     tictactoeSessions.delete(m.key.remoteJid);
+                                     return sock.sendMessage(m.key.remoteJid, { text: 'Salah satu pemain tidak memiliki cukup koin lagi. Tantangan dibatalkan.' }, { quoted: m });
+                                }
+
+                                try {
+                                    db.prepare('UPDATE rpg_users SET money = money - ? WHERE jid = ?').run(session.bet, session.players[0].jid);
+                                    db.prepare('UPDATE rpg_users SET money = money - ? WHERE jid = ?').run(session.bet, session.players[1].jid);
+                                    rpgUserCache.delete(session.players[0].jid);
+                                    rpgUserCache.delete(session.players[1].jid);
+                                    
+                                    const newSession = { ...session, mode: 'pvp', board: Array(9).fill(''), currentPlayerIndex: 0, expiresAt: Date.now() + TTT_GAME_TIMEOUT_MS };
+                                    const messageText = tttCreateGameMessage(newSession, 'Permainan dimulai!');
+                                    await sock.sendMessage(m.key.remoteJid, { text: messageText, mentions: [session.players[0].jid, session.players[1].jid] });
+                                    tictactoeSessions.set(m.key.remoteJid, newSession);
+                                } catch (error) {
+                                    logger.error({err: error}, "Gagal memulai game PvP TTT");
+                                }
+                                return;
+                            }
+
+                            if (tttGameMatch) {
+                                const gameId = tttGameMatch[1];
+                                const session = tictactoeSessions.get(m.key.remoteJid);
+                                if (!session || session.gameId !== gameId) return;
+                                
+                                if (Date.now() > session.expiresAt) {
+                                    tictactoeSessions.delete(m.key.remoteJid);
+                                    db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(session.bet, session.players[0].jid);
+                                    if(session.mode === 'pvp') db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(session.bet, session.players[1].jid);
+                                    return sock.sendMessage(m.key.remoteJid, { text: 'Waktu permainan habis! Game dibatalkan dan taruhan dikembalikan.' }, { quoted: m });
+                                }
+
+                                const currentPlayer = session.players[session.currentPlayerIndex];
+                                if (currentPlayer.jid !== m.sender) return await sock.sendMessage(m.key.remoteJid, { text: 'Bukan giliranmu.' }, { quoted: m });
+
+                                const move = parseInt(text.trim(), 10) - 1;
+                                if (isNaN(move) || move < 0 || move > 8 || session.board[move] !== '') {
+                                    return await sock.sendMessage(m.key.remoteJid, { text: 'Pilihan tidak valid. Pilih nomor kotak yang masih kosong.' }, { quoted: m });
+                                }
+                                
+                                session.expiresAt = Date.now() + TTT_GAME_TIMEOUT_MS;
+                                session.board[move] = currentPlayer.symbol;
+                                let winnerSymbol = tttCheckWin(session.board);
+                                let isDraw = !winnerSymbol && tttCheckDraw(session.board);
+
+                                if (winnerSymbol || isDraw) {
+                                    tictactoeSessions.delete(m.key.remoteJid);
+                                    let endMessage;
+                                    let mentions = session.players.filter(p=>p.jid !== 'AI').map(p=>p.jid);
+                                    try {
+                                        if (winnerSymbol) {
+                                            const winner = session.players.find(p => p.symbol === winnerSymbol);
+                                            const totalPrize = session.mode === 'pvp' ? session.bet * 2 : Math.floor(session.bet * 1.5);
+                                            endMessage = `*Permainan Selesai!* Pemenangnya adalah ${winner.jid === 'AI' ? 'AI' : `@${winner.jid.split('@')[0]}`}! Hadiah *${formatCoin(totalPrize)}* telah diterima.`;
+                                            if (winner.jid !== 'AI') {
+                                                db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(totalPrize, winner.jid);
+                                                rpgUserCache.delete(winner.jid);
+                                            }
+                                        } else {
+                                            endMessage = `*Permainan Berakhir Seri!* Taruhan dikembalikan ke masing-masing pemain.`;
+                                            session.players.forEach(p => {
+                                                if (p.jid !== 'AI') {
+                                                    db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(session.bet, p.jid);
+                                                    rpgUserCache.delete(p.jid);
+                                                }
+                                            });
+                                        }
+                                    } catch (dbError) {
+                                        logger.error({err: dbError}, 'Error saat transaksi TTT');
+                                        endMessage = "Permainan berakhir, tapi terjadi error saat memproses hadiah.";
+                                    }
+                                    const finalText = `✨ *Tic Tac Toe* ✨\n\n${tttGenerateBoard(session.board)}\n\n${endMessage}`;
+                                    await sock.sendMessage(m.key.remoteJid, { text: finalText, mentions });
+                                } else {
+                                    session.currentPlayerIndex = 1 - session.currentPlayerIndex;
+                                    
+                                    if (session.players[session.currentPlayerIndex].jid === 'AI') {
+                                        const aiMove = tttMakeAiMove(session.board, session.mode);
+                                        session.board[aiMove] = session.players[session.currentPlayerIndex].symbol;
+                                        winnerSymbol = tttCheckWin(session.board);
+                                        isDraw = !winnerSymbol && tttCheckDraw(session.board);
+
+                                        if (winnerSymbol || isDraw) {
+                                            tictactoeSessions.delete(m.key.remoteJid);
+                                            let endMessage;
+                                            if (winnerSymbol) {
+                                                endMessage = `*Permainan Selesai!* Sayang sekali, AI memenangkan permainan ini. Taruhanmu hangus.`;
+                                            } else {
+                                                endMessage = `*Permainan Berakhir Seri!* Taruhan dikembalikan.`;
+                                                db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(session.bet, session.players[0].jid);
+                                                rpgUserCache.delete(session.players[0].jid);
+                                            }
+                                            const finalText = `✨ *Tic Tac Toe* ✨\n\n${tttGenerateBoard(session.board)}\n\n${endMessage}`;
+                                            await sock.sendMessage(m.key.remoteJid, { text: finalText, mentions: [session.players[0].jid]});
+                                            return;
+                                        }
+                                        session.currentPlayerIndex = 1 - session.currentPlayerIndex;
+                                    }
+                                    const messageText = tttCreateGameMessage(session, 'Lanjutkan!');
+                                    const mentions = session.players.filter(p => p.jid !== 'AI').map(p => p.jid);
+                                    await sock.sendMessage(m.key.remoteJid, { text: messageText, mentions });
                                 }
                                 return;
                             }

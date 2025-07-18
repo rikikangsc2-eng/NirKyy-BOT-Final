@@ -1,32 +1,32 @@
 import axios from 'axios';
 import crypto from 'crypto';
-import { susunkataSessions } from '#database';
+import { susunkataSessions, susunkataDataCache } from '#database';
 import logger from '#lib/logger.js';
 
-let gameData = [];
 const GAME_DURATION_S = 60;
+const DATA_URL = 'https://github.com/rikikangsc2-eng/metadata/raw/refs/heads/main/susunkata.json';
 
-async function loadGameData() {
-    if (gameData.length > 0) return;
+async function getSusunkataData() {
+    if (susunkataDataCache.has('gameData')) {
+        return susunkataDataCache.get('gameData');
+    }
     try {
-        const { data } = await axios.get('https://github.com/rikikangsc2-eng/metadata/raw/refs/heads/main/susunkata.json');
+        const { data } = await axios.get(DATA_URL);
         if (data && Array.isArray(data) && data.length > 0) {
-            gameData = data;
-            logger.info(`Berhasil memuat ${gameData.length} soal Susun Kata.`);
-        } else {
-            throw new Error('Format data tidak valid atau kosong');
+            logger.info(`Berhasil memuat dan menyimpan cache ${data.length} soal Susun Kata.`);
+            susunkataDataCache.set('gameData', data);
+            return data;
         }
+        throw new Error('Format data tidak valid atau kosong');
     } catch (error) {
         logger.error({ err: error }, 'Gagal memuat data game Susun Kata');
-        gameData = [];
+        return [];
     }
 }
 
 const hashAnswer = (answer) => {
     return crypto.createHash('sha256').update(answer.toUpperCase()).digest('hex');
 };
-
-loadGameData();
 
 export default {
     name: 'susunkata',
@@ -43,11 +43,9 @@ export default {
             return sock.sendMessage(chatId, { text: `Masih ada soal yang belum terjawab di grup ini. Silakan selesaikan dulu soal yang ada.` }, { quoted: m });
         }
         
+        const gameData = await getSusunkataData();
         if (gameData.length === 0) {
-            await loadGameData();
-            if (gameData.length === 0) {
-                 return sock.sendMessage(chatId, { text: 'Maaf, bank soal game sedang tidak tersedia. Coba lagi nanti.' }, { quoted: m });
-            }
+            return sock.sendMessage(chatId, { text: 'Maaf, bank soal game sedang tidak tersedia. Coba lagi nanti.' }, { quoted: m });
         }
 
         const question = gameData[Math.floor(Math.random() * gameData.length)];

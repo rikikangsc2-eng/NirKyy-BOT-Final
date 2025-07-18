@@ -42,9 +42,11 @@ console.log('Koneksi dan skema database siap.');
 
 export const groupSettingsCache = new LRUCache({ max: 500, ttl: 1000 * 60 * 30 });
 export const rpgUserCache       = new LRUCache({ max: 300, ttl: 1000 * 60 * 5 });
-export const userLimitCache    = new LRUCache({ max: 500, ttl: 1000 * 60 * 2 });
-export const afkUserCache      = new LRUCache({ max: 300, ttl: 1000 * 60 * 2 });
-export const susunkataSessions = new LRUCache({ max: 100, ttl: 1000 * 60 * 5 });
+export const userLimitCache     = new LRUCache({ max: 500, ttl: 1000 * 60 * 2 });
+export const afkUserCache       = new LRUCache({ max: 300, ttl: 1000 * 60 * 2 });
+export const susunkataSessions  = new LRUCache({ max: 100, ttl: 1000 * 60 * 5 });
+export const susunkataDataCache = new LRUCache({ max: 1, ttl: 1000 * 60 * 60 });
+export const tictactoeSessions  = new LRUCache({ max: 100, ttl: 1000 * 60 * 15 });
 
 const _statements = {
     getGroupSettings: db.prepare('SELECT antilink_enabled, welcome_enabled, welcome_message FROM groups WHERE groupId = ?'),
