@@ -1,6 +1,6 @@
 import axios from 'axios';
 import crypto from 'crypto';
-import { susunkataSessions, susunkataDataCache } from '#database';
+import { gameSessionCache, statements, susunkataDataCache } from '#database';
 import logger from '#lib/logger.js';
 
 const GAME_DURATION_S = 60;
@@ -38,8 +38,9 @@ export default {
         if (!chatId.endsWith('@g.us')) {
             return sock.sendMessage(chatId, { text: 'Game ini hanya bisa dimainkan di dalam grup.' }, { quoted: m });
         }
-
-        if (susunkataSessions.has(chatId)) {
+        
+        const existingSession = gameSessionCache.get(chatId) || statements.getGameSession.get(chatId);
+        if (existingSession) {
             return sock.sendMessage(chatId, { text: `Masih ada soal yang belum terjawab di grup ini. Silakan selesaikan dulu soal yang ada.` }, { quoted: m });
         }
         
@@ -53,11 +54,26 @@ export default {
         const answerHash = hashAnswer(correctAnswer);
         const expiresAt = Date.now() + (GAME_DURATION_S * 1000);
 
-        susunkataSessions.set(chatId, {
+        const sessionData = {
+            gameId: crypto.randomBytes(8).toString('hex'),
             question: question.pertanyaan,
             answer: correctAnswer,
             expiresAt: expiresAt
-        });
+        };
+
+        statements.insertOrReplaceGameSession.run(
+            chatId,
+            'susunkata',
+            JSON.stringify(sessionData),
+            expiresAt
+        );
+        
+        const fullSessionForCache = {
+            ...sessionData,
+            game_type: 'susunkata',
+            db_expires_at: expiresAt
+        };
+        gameSessionCache.set(chatId, fullSessionForCache);
 
         const ZWS = '\u200B';
         const metadata = `${ZWS.repeat(3)}SUSUNKATA:${expiresAt}:${answerHash}${ZWS.repeat(3)}`;

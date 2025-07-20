@@ -1,4 +1,4 @@
-import db, { tictactoeSessions, getRpgUser, rpgUserCache } from '#database';
+import db, { gameSessionCache, statements, getRpgUser, rpgUserCache } from '#database';
 import config from '#config';
 import crypto from 'crypto';
 
@@ -37,8 +37,8 @@ export default {
             return sock.sendMessage(chatId, { text: 'Untuk menerima tantangan, kamu harus membalas (reply) langsung pesan undangan yang dikirim bot.' }, { quoted: m });
         }
 
-        const existingSession = tictactoeSessions.get(chatId);
-        if (existingSession && existingSession.mode !== 'pvp_invite') {
+        const existingSession = gameSessionCache.get(chatId) || statements.getGameSession.get(chatId);
+        if (existingSession && (!existingSession.game_type || existingSession.game_type !== 'ttt_invite')) {
             return sock.sendMessage(chatId, { text: 'Masih ada permainan yang berlangsung di grup ini. Selesaikan dulu ya.' }, { quoted: m });
         }
         
@@ -75,29 +75,34 @@ export default {
                 return sock.sendMessage(chatId, { text: `Koin @${opponentJid.split('@')[0]} tidak cukup untuk taruhan ini.`, mentions: [opponentJid] }, { quoted: m });
             }
             
-            const gameId = crypto.randomBytes(8).toString('hex');
-            const invitationSession = {
-                gameId,
-                mode: 'pvp_invite',
+            const expiresAt = Date.now() + GAME_TIMEOUT_MS;
+            const invitationSessionData = {
+                gameId: crypto.randomBytes(8).toString('hex'),
                 bet: finalBet,
                 players: [
                     { jid: player1Jid, symbol: '❌' },
                     { jid: opponentJid, symbol: '⭕' }
                 ],
-                expiresAt: Date.now() + GAME_TIMEOUT_MS
             };
-            tictactoeSessions.set(chatId, invitationSession);
+            
+            statements.insertOrReplaceGameSession.run(chatId, 'ttt_invite', JSON.stringify(invitationSessionData), expiresAt);
+            const fullSessionForCache = {
+                ...invitationSessionData,
+                game_type: 'ttt_invite',
+                db_expires_at: expiresAt
+            };
+            gameSessionCache.set(chatId, fullSessionForCache);
 
             const ZWS = '\u200B';
-            const metadata = `${ZWS.repeat(3)}TTT_INVITE:${gameId}${ZWS.repeat(3)}`;
+            const metadata = `${ZWS.repeat(3)}TTT_INVITE:${invitationSessionData.gameId}${ZWS.repeat(3)}`;
             const inviteText = `Tantangan Tic Tac Toe dari @${player1Jid.split('@')[0]}! ⚔️\n\nTaruhan: *${formatCoin(finalBet)}*\n\n@${opponentJid.split('@')[0]}, balas (reply) pesan ini dengan \`terima\` untuk memulai permainan.\n(Tantangan kedaluwarsa dalam 10 menit)\n\n${metadata}`;
             return sock.sendMessage(chatId, { text: inviteText, mentions: [player1Jid, opponentJid] });
         }
 
         if (['mudah', 'sulit'].includes(mode)) {
-            const gameId = crypto.randomBytes(8).toString('hex');
-            const session = {
-                gameId,
+            const expiresAt = Date.now() + GAME_TIMEOUT_MS;
+            const sessionData = {
+                gameId: crypto.randomBytes(8).toString('hex'),
                 mode: mode,
                 bet: finalBet,
                 board: Array(9).fill(''),
@@ -106,15 +111,21 @@ export default {
                     { jid: 'AI', symbol: '⭕' }
                 ],
                 currentPlayerIndex: 0,
-                expiresAt: Date.now() + GAME_TIMEOUT_MS
             };
 
             try {
                 db.prepare('UPDATE rpg_users SET money = money - ? WHERE jid = ?').run(finalBet, player1Jid);
                 rpgUserCache.delete(player1Jid);
-                tictactoeSessions.set(chatId, session);
+                
+                statements.insertOrReplaceGameSession.run(chatId, 'tictactoe', JSON.stringify(sessionData), expiresAt);
+                const fullSessionForCache = {
+                    ...sessionData,
+                    game_type: 'tictactoe',
+                    db_expires_at: expiresAt
+                };
+                gameSessionCache.set(chatId, fullSessionForCache);
 
-                const messageText = createGameMessage(session, 'Permainan dimulai!');
+                const messageText = createGameMessage(sessionData, 'Permainan dimulai!');
                 await sock.sendMessage(chatId, { text: messageText, mentions: [player1Jid] });
 
             } catch (error) {

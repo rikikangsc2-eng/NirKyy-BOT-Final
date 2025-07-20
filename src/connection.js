@@ -20,18 +20,28 @@ import { start as startTradingSimulator } from '#lib/tradingSimulator.js';
 export const groupMetadataCache = new LRUCache({ max: 1000, ttl: 1000 * 60 * 5 });
 
 let sock;
-let isConnecting = false;
+let rl;
 let retryCount = 0;
 const MAX_RETRIES = 5;
 const SESSION_CLEANUP_INTERVAL = 1000 * 60 * 60 * 24;
 const SESSION_FILE_AGE_LIMIT = 1000 * 60 * 60 * 24 * 7;
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
+const question = (text) => new Promise((resolve) => {
+    if (!rl || rl.closed) {
+        rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+    }
+    rl.question(text, resolve);
 });
 
-const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+const closeRl = () => {
+    if (rl && !rl.closed) {
+        rl.close();
+        rl = null;
+    }
+};
 
 async function emergencySessionCleanup() {
     const sessionDir = path.join(process.cwd(), 'baileys_session');
@@ -83,13 +93,39 @@ async function scheduleSessionCleanup() {
     }
 }
 
-async function connectToWhatsApp() {
-    if (isConnecting || (sock && sock.ws.readyState === 1)) {
-        logger.info('Koneksi sudah ada atau sedang diproses.');
-        return;
-    }
-    isConnecting = true;
+async function handleConnectionUpdate(update) {
+    const { connection, lastDisconnect } = update;
 
+    if (connection === 'open') {
+        logger.info('Anjay, bot udah nyambung dan siap nge-gas!');
+        retryCount = 0;
+        closeRl();
+    } else if (connection === 'close') {
+        const lastDisconnectError = lastDisconnect?.error;
+        const shouldReconnect = (lastDisconnectError instanceof Boom) &&
+                                lastDisconnectError.output?.statusCode !== DisconnectReason.loggedOut;
+        
+        logger.error({ error: lastDisconnectError }, 'Koneksi terputus');
+
+        if (shouldReconnect) {
+            if (retryCount < MAX_RETRIES) {
+                retryCount++;
+                const delay = Math.pow(2, retryCount) * 1000;
+                logger.info(`Mencoba menyambung ulang dalam ${delay / 1000} detik (percobaan ke-${retryCount})...`);
+                setTimeout(startBot, delay);
+            } else {
+                logger.fatal(`Gagal menyambung setelah ${MAX_RETRIES} percobaan. Bot berhenti.`);
+                process.exit(1);
+            }
+        } else {
+            logger.warn('Koneksi putus permanen (Logged Out). Hapus folder "baileys_session" dan restart.');
+            closeRl();
+            process.exit(1);
+        }
+    }
+}
+
+async function startBot() {
     const { state, saveCreds: originalSaveCreds } = await useMultiFileAuthState('baileys_session');
     
     const saveCreds = async () => {
@@ -121,7 +157,7 @@ async function connectToWhatsApp() {
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`Menggunakan Baileys versi: ${version.join('.')}, isLatest: ${isLatest}`);
 
-    const baileysLogger = pino({ level: 'warn' });
+    const baileysLogger = pino({ level: 'silent' });
 
     sock = makeWASocket({
         version,
@@ -133,11 +169,6 @@ async function connectToWhatsApp() {
         getMessage: async (key) => undefined
     });
     
-    initializeHandler(sock);
-    startTradingSimulator(sock);
-    
-    sock.ev.on('creds.update', saveCreds);
-
     if (!sock.authState.creds.registered) {
         try {
             const phoneNumber = await question('Sesi tidak ditemukan. Masukkan nomor WhatsApp Bot Anda (contoh: 628xxxxxxxx): ');
@@ -147,43 +178,16 @@ async function connectToWhatsApp() {
             logger.info(`====================================\n`);
         } catch (error) {
             logger.error("Gagal request pairing code:", error);
-            rl.close();
-            isConnecting = false;
+            closeRl();
             process.exit(1);
         }
     }
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === 'open') {
-            logger.info('Anjay, bot udah nyambung dan siap nge-gas!');
-            isConnecting = false;
-            retryCount = 0;
-            if (rl) rl.close();
-        } else if (connection === 'close') {
-            isConnecting = false;
-            
-            const lastDisconnectError = lastDisconnect?.error;
-            const shouldReconnect = (lastDisconnectError instanceof Boom) &&
-                                    lastDisconnectError.output?.statusCode !== DisconnectReason.loggedOut;
-            
-            logger.error({ error: lastDisconnectError }, 'Koneksi terputus');
-
-            if (shouldReconnect && retryCount < MAX_RETRIES) {
-                retryCount++;
-                const delay = Math.pow(2, retryCount) * 1000;
-                logger.info(`Mencoba menyambung ulang dalam ${delay / 1000} detik (percobaan ke-${retryCount})...`);
-                setTimeout(connectToWhatsApp, delay);
-            } else if (shouldReconnect) {
-                logger.fatal(`Gagal menyambung setelah ${MAX_RETRIES} percobaan. Bot berhenti.`);
-                process.exit(1);
-            } else {
-                logger.warn('Koneksi putus permanen (Logged Out). Hapus folder "baileys_session" dan restart.');
-                process.exit(1);
-            }
-        }
-    });
+    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('connection.update', handleConnectionUpdate);
+    
+    initializeHandler(sock);
+    startTradingSimulator(sock);
 }
 
 async function gracefulShutdown() {
@@ -201,8 +205,4 @@ async function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
-export async function startBot() {
-    await connectToWhatsApp();
-    setInterval(scheduleSessionCleanup, SESSION_CLEANUP_INTERVAL);
-    scheduleSessionCleanup();
-}
+export { startBot };

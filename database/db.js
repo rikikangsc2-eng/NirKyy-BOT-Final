@@ -18,6 +18,7 @@ db.exec(`
     CREATE TABLE IF NOT EXISTS rpg_trading_positions ( id INTEGER PRIMARY KEY AUTOINCREMENT, user_jid TEXT NOT NULL, asset_name TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('buy', 'sell')), entry_price REAL NOT NULL, amount_invested INTEGER NOT NULL, stop_loss REAL, take_profit REAL, status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'closed')), opened_at INTEGER NOT NULL, closed_at INTEGER, pnl INTEGER, FOREIGN KEY (user_jid) REFERENCES rpg_users (jid) ON DELETE CASCADE );
     CREATE TABLE IF NOT EXISTS group_user_stats ( group_id TEXT NOT NULL, user_jid TEXT NOT NULL, message_count INTEGER DEFAULT 1, PRIMARY KEY (group_id, user_jid) );
     CREATE TABLE IF NOT EXISTS group_lists ( group_id TEXT NOT NULL, list_key TEXT NOT NULL, list_value TEXT NOT NULL, PRIMARY KEY (group_id, list_key) );
+    CREATE TABLE IF NOT EXISTS game_sessions ( chat_id TEXT PRIMARY KEY, game_type TEXT NOT NULL, session_data TEXT NOT NULL, expires_at INTEGER NOT NULL );
 `);
 
 try {
@@ -34,8 +35,14 @@ try {
     if (!columns.some(col => col.name === 'last_beg')) {
         db.exec("ALTER TABLE rpg_users ADD COLUMN last_beg INTEGER DEFAULT 0");
     }
+    db.prepare("PRAGMA table_info(game_sessions)").all();
 } catch (error) {
-    console.error('Gagal menjalankan migrasi database untuk rpg_users:', error);
+    if (error.message.includes('no such table: game_sessions')) {
+        db.exec("CREATE TABLE IF NOT EXISTS game_sessions ( chat_id TEXT PRIMARY KEY, game_type TEXT NOT NULL, session_data TEXT NOT NULL, expires_at INTEGER NOT NULL );");
+        console.log("Tabel 'game_sessions' berhasil dibuat.");
+    } else {
+        console.error('Gagal menjalankan migrasi database:', error);
+    }
 }
 
 console.log('Koneksi dan skema database siap.');
@@ -44,9 +51,8 @@ export const groupSettingsCache = new LRUCache({ max: 500, ttl: 1000 * 60 * 30 }
 export const rpgUserCache       = new LRUCache({ max: 300, ttl: 1000 * 60 * 5 });
 export const userLimitCache     = new LRUCache({ max: 500, ttl: 1000 * 60 * 2 });
 export const afkUserCache       = new LRUCache({ max: 300, ttl: 1000 * 60 * 2 });
-export const susunkataSessions  = new LRUCache({ max: 100, ttl: 1000 * 60 * 5 });
+export const gameSessionCache   = new LRUCache({ max: 100, ttl: 1000 * 60 * 15 });
 export const susunkataDataCache = new LRUCache({ max: 1, ttl: 1000 * 60 * 60 });
-export const tictactoeSessions  = new LRUCache({ max: 100, ttl: 1000 * 60 * 15 });
 
 const _statements = {
     getGroupSettings: db.prepare('SELECT antilink_enabled, welcome_enabled, welcome_message FROM groups WHERE groupId = ?'),
@@ -76,6 +82,10 @@ const _statements = {
     getGroupListItem: db.prepare('SELECT list_value FROM group_lists WHERE group_id = ? AND list_key = ?'),
     deleteGroupListItem: db.prepare('DELETE FROM group_lists WHERE group_id = ? AND list_key = ?'),
     getAllGroupListItems: db.prepare('SELECT list_key FROM group_lists WHERE group_id = ? ORDER BY list_key ASC'),
+    getGameSession: db.prepare('SELECT * FROM game_sessions WHERE chat_id = ?'),
+    insertOrReplaceGameSession: db.prepare('INSERT OR REPLACE INTO game_sessions (chat_id, game_type, session_data, expires_at) VALUES (?, ?, ?, ?)'),
+    deleteGameSession: db.prepare('DELETE FROM game_sessions WHERE chat_id = ?'),
+    getExpiredGameSessions: db.prepare('SELECT * FROM game_sessions WHERE expires_at < ?'),
 };
 export const statements = _statements;
 
