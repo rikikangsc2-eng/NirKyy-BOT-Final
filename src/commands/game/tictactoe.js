@@ -26,7 +26,7 @@ function createGameMessage(session, statusText) {
 export default {
     name: 'tictactoe',
     aliases: ['ttt'],
-    category: 'rpg',
+    category: 'game',
     description: 'Main Tic Tac Toe dengan taruhan melawan AI atau teman.',
     async execute({ sock, m, args }) {
         const chatId = m.key.remoteJid;

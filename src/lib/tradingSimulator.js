@@ -16,8 +16,8 @@ const MAX_HISTORY_RECORDS = 200;
 let activeSocket = null;
 
 export const SUPPORTED_ASSETS = {
-    'BTC': { volatility: 0.025, name: 'Bitcoin' },
-    'NKK': { volatility: 0.1, name: 'NirKyy Koin' }
+    'BTC': { name: 'Bitcoin', initialPrice: 1000000000, volatility: 0.025 },
+    'NKK': { name: 'NirKyy Koin', initialPrice: 50000, volatility: 0.1 }
 };
 
 export const STOP_LOSS_PERCENT = 0.05;
@@ -27,22 +27,47 @@ export { UPDATE_INTERVAL };
 let simulatorIntervalId = null;
 const formatRupiah = (number) => `Rp ${Math.round(number).toLocaleString('id-ID')}`;
 
-const generateNewCandle = (lastPrice, volatility) => ({
-    timestamp: Math.floor(Date.now() / 1000),
-    open: Math.round(lastPrice),
-    high: Math.round(lastPrice * (1 + Math.random() * volatility)),
-    low: Math.round(lastPrice * (1 - Math.random() * volatility)),
-    close: Math.round(lastPrice * (1 + (Math.random() - 0.5) * volatility * 2))
-});
+const generateNewCandle = (lastPrice, initialPrice, volatility) => {
+    const meanReversionStrength = 0.05;
+
+    const reversionPull = (initialPrice - lastPrice) * meanReversionStrength;
+    const randomFluctuation = (Math.random() - 0.5) * 2 * volatility * lastPrice;
+    
+    const change = reversionPull + randomFluctuation;
+    const newClose = Math.max(1, lastPrice + change);
+
+    const open = lastPrice;
+    const high = Math.max(open, newClose) + (Math.random() * volatility * 0.5 * lastPrice);
+    const low = Math.min(open, newClose) - (Math.random() * volatility * 0.5 * lastPrice);
+
+    return {
+        timestamp: Math.floor(Date.now() / 1000),
+        open: Math.round(open),
+        high: Math.round(Math.max(1, high)),
+        low: Math.round(Math.max(1, low)),
+        close: Math.round(newClose)
+    };
+};
 
 const updateAssetPrices = db.transaction(() => {
     for (const assetName in SUPPORTED_ASSETS) {
         const lastRecord = selectLastCloseStmt.get(assetName);
         if (!lastRecord) {
-            logger.warn(`Tidak ada data harga untuk ${assetName}, update dilewati.`);
+            logger.warn(`Tidak ada data harga untuk ${assetName}, inisialisasi dengan harga dasar.`);
+            const initialCandle = {
+                timestamp: Math.floor(Date.now() / 1000),
+                open: SUPPORTED_ASSETS[assetName].initialPrice,
+                high: SUPPORTED_ASSETS[assetName].initialPrice,
+                low: SUPPORTED_ASSETS[assetName].initialPrice,
+                close: SUPPORTED_ASSETS[assetName].initialPrice
+            };
+            insertCandleStmt.run(assetName, initialCandle.timestamp, initialCandle.open, initialCandle.high, initialCandle.low, initialCandle.close);
             continue;
         }
-        const newCandle = generateNewCandle(lastRecord.close, SUPPORTED_ASSETS[assetName].volatility);
+        
+        const assetInfo = SUPPORTED_ASSETS[assetName];
+        const newCandle = generateNewCandle(lastRecord.close, assetInfo.initialPrice, assetInfo.volatility);
+        
         insertCandleStmt.run(
             assetName, newCandle.timestamp, newCandle.open, newCandle.high, newCandle.low, newCandle.close
         );
@@ -104,9 +129,9 @@ async function checkAllActivePositions() {
 
             for (const pos of closedPositions) {
                 const pnlText = pos.pnl >= 0
-                    ? ` Untung *${formatRupiah(pos.pnl)}*`
-                    : ` Rugi *${formatRupiah(Math.abs(pos.pnl))}*`;
-                const message = ` *Posisi Trading Ditutup Otomatis!* \n\n` +
+                    ? `  Untung *${formatRupiah(pos.pnl)}*`
+                    : `  Rugi *${formatRupiah(Math.abs(pos.pnl))}*`;
+                const message = `  *Posisi Trading Ditutup Otomatis!*  \n\n` +
                     `Posisi *${pos.asset_name.toUpperCase()}* Anda telah ditutup karena mencapai ` +
                     `target *${pos.triggerType}*.\n\n*Hasil Transaksi:*\n- Status: ${pnlText}\n- ` +
                     `Uang kembali ke saldo: *${formatRupiah(pos.finalAmount)}*\n\n` +

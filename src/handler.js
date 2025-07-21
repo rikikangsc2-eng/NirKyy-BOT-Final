@@ -20,8 +20,8 @@ const groupMembershipCache = new LRUCache({ max: 500, ttl: 1000 * 60 * 15 });
 const FourteenDaysInMs = 14 * 24 * 60 * 60 * 1000;
 const MAX_MESSAGE_PROCESS = 5;
 const EXEC_TIMEOUT = 30000;
-const LIMIT_REQUIRED_CATEGORIES = ['downloader', 'tools', 'ai'];
-const REWARD_SUSUNKATA = 1500;
+const LIMIT_REQUIRED_CATEGORIES = ['downloader', 'tools', 'ai','random'];
+const REWARD_GAME = 1500;
 const TTT_GAME_TIMEOUT_MS = 10 * 60 * 1000;
 const SESSION_CLEANUP_INTERVAL_MS = 60 * 1000;
 
@@ -47,6 +47,8 @@ function cleanupExpiredSessions(sock) {
 
         if (dbSession.game_type === 'susunkata') {
             message = `Waktu habis untuk game Susun Kata! 😥\n\nJawaban untuk soal "${session.question}" adalah *${session.answer}*.`;
+        } else if (dbSession.game_type === 'tebakkata') {
+            message = `Waktu habis untuk game Tebak Kata! 😥\n\nJawaban untuk soal "${session.question}" adalah *${session.answer}*.`;
         } else if (dbSession.game_type === 'tictactoe' || dbSession.game_type === 'ttt_invite') {
             try {
                 const refundTransaction = db.transaction(() => {
@@ -270,23 +272,27 @@ export async function initializeHandler(sock) {
                             }
                             
                             const susunkataMetadataRegex = /\u200B{3}SUSUNKATA:(\d+):([a-f0-9]+)\u200B{3}/;
+                            const tebakkataMetadataRegex = /\u200B{3}TEBAKKATA:(\d+):([a-f0-9]+)\u200B{3}/;
                             const tttInviteMetadataRegex = /\u200B{3}TTT_INVITE:(.*?)\u200B{3}/;
                             const tttGameMetadataRegex = /\u200B{3}TICTACTOE:(.*?)\u200B{3}/;
                             
                             const susunkataMatch = quotedText.match(susunkataMetadataRegex);
+                            const tebakkataMatch = quotedText.match(tebakkataMetadataRegex);
                             const tttInviteMatch = quotedText.match(tttInviteMetadataRegex);
                             const tttGameMatch = quotedText.match(tttGameMetadataRegex);
 
-                            if (susunkataMatch) {
+                            if (susunkataMatch || tebakkataMatch) {
+                                const isSusunKata = !!susunkataMatch;
                                 const gameSession = await getSession(m.key.remoteJid);
-                                if (!gameSession || gameSession.game_type !== 'susunkata') {
+                                const expectedGameType = isSusunKata ? 'susunkata' : 'tebakkata';
+
+                                if (!gameSession || gameSession.game_type !== expectedGameType) {
                                     return await sock.sendMessage(m.key.remoteJid, { text: 'Sesi game ini sudah berakhir.' }, { quoted: m });
                                 }
                                 
                                 if (Date.now() > gameSession.expiresAt) {
-                                    statements.deleteGameSession.run(m.key.remoteJid);
-                                    gameSessionCache.delete(m.key.remoteJid);
-                                    return await sock.sendMessage(m.key.remoteJid, { text: `Waktu habis! 😥\n\nJawaban untuk soal "${gameSession.question}" adalah *${gameSession.answer}*.` }, { quoted: m });
+                                    cleanupExpiredSessions(sock);
+                                    return;
                                 }
 
                                 const userAnswer = text.trim();
@@ -297,9 +303,9 @@ export async function initializeHandler(sock) {
                                     const userRpg = statements.getRpgUser.get(winnerJid);
                                     let rewardMessage = '';
                                     if (userRpg) {
-                                        db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(REWARD_SUSUNKATA, winnerJid);
+                                        db.prepare('UPDATE rpg_users SET money = money + ? WHERE jid = ?').run(REWARD_GAME, winnerJid);
                                         rpgUserCache.delete(winnerJid);
-                                        rewardMessage = ` dan mendapatkan hadiah *${formatCoin(REWARD_SUSUNKATA)}*!`;
+                                        rewardMessage = ` dan mendapatkan hadiah *${formatCoin(REWARD_GAME)}*!`;
                                     }
                                     const message = `*Benar!* 🎉\n\nJawaban: *${gameSession.answer}*\n\nSelamat kepada @${winnerJid.split('@')[0]} yang berhasil menjawab${rewardMessage}`;
                                     await sock.sendMessage(m.key.remoteJid, { text: message, mentions: [winnerJid] });
@@ -315,9 +321,7 @@ export async function initializeHandler(sock) {
                                 if (!session || session.gameId !== gameId || session.game_type !== 'ttt_invite') return;
                                 
                                 if (Date.now() > session.db_expires_at) {
-                                    statements.deleteGameSession.run(m.key.remoteJid);
-                                    gameSessionCache.delete(m.key.remoteJid);
-                                    return sock.sendMessage(m.key.remoteJid, { text: 'Waduh, tantangan ini sudah kedaluwarsa.' }, { quoted: m });
+                                    cleanupExpiredSessions(sock); return;
                                 }
 
                                 if (m.sender !== session.players[1].jid) return sock.sendMessage(m.key.remoteJid, { text: 'Hanya pemain yang ditantang yang bisa menerima.' }, { quoted: m });
