@@ -1,3 +1,6 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import { startBot } from '#connection';
 import logger from '#lib/logger.js';
 
