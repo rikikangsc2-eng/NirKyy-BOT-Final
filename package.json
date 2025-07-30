@@ -10,9 +10,10 @@
   "imports": {
     "#config": "./settings/config.js",
     "#database": "./database/db.js",
-    "#handler": "./src/handler.js",
+    "#events/*": "./src/events/*",
+    "#processors/*": "./src/processors/*",
+    "#game/*": "./src/game/*",
     "#lib/*": "./src/lib/*",
-    "#aihelper": "./src/lib/aiHelper.js",
     "#connection": "./src/connection.js"
   },
   "dependencies": {
@@ -22,7 +23,7 @@
     "axios": "^1.6.0",
     "better-sqlite3": "^9.4.3",
     "cheerio": "^1.0.0-rc.12",
-    "dotenv":"*",
+    "dotenv": "*",
     "form-data": "^4.0.0",
     "jimp": "latest",
     "link-preview-js": "^3.0.5",
